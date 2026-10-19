@@ -20,8 +20,12 @@ jobs:
         run: ./gradlew genSources --stacktrace
       - name: Dump offer logic
         run: |
+          echo "===== candidate sources jars ====="
+          find / -name '*-sources.jar' 2>/dev/null | head -20
+          echo "===== candidate decompiled dirs ====="
+          find / -name 'EnchantmentScreenHandler.java' 2>/dev/null | head -5
           rm -rf /tmp/src && mkdir -p /tmp/src
-          J=$(find "$GRADLE_USER_HOME/caches/fabric-loom" -name '*sources*.jar' | head -1)
+          J=$(find / -name '*-sources.jar' 2>/dev/null | grep -iv 'gradle-\|kotlin' | head -1)
           echo "JAR=$J"
           unzip -o -q "$J" 'net/minecraft/screen/EnchantmentScreenHandler.java' 'net/minecraft/client/gui/screen/ingame/EnchantmentScreen.java' -d /tmp/src
           S=/tmp/src/net/minecraft/screen/EnchantmentScreenHandler.java
