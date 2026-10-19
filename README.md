@@ -26,13 +26,13 @@ Your gear is never permanently enchanted until the final success, so it cannot b
 | `target` | `minecraft:protection` | Enchantments that stop the loop |
 | `target-level` | `4` | Required level of the target |
 | `max-attempts` | `100` | Give up after this many rerolls |
-| `required-level` | `30` | XP level needed for the bottom row (30 with 15 bookshelves) |
 | `refill-xp` | `true` | Throw XP bottles when levels are too low |
 | `delay` | `3` | Ticks between actions |
 
 **Requirements**
 
-- Enchanting table within 4 blocks, with 15 bookshelves for level-30 offers.
+- Enchanting table within 4 blocks. More bookshelves raise the level cost of the offers; the
+  needed XP is read from the table itself, so it adapts to your setup.
 - Grindstone within 4 blocks.
 - Lapis lazuli and (optionally) Bottles o' Enchanting in your inventory.
 
