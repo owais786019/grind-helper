@@ -15,10 +15,10 @@ import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
-import net.minecraft.component.type.ItemEnchantmentsComponent;
+
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
-import net.minecraft.entity.player.PlayerEntity;
+
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -28,7 +28,7 @@ import net.minecraft.registry.RegistryKeys;
 import net.minecraft.screen.EnchantmentScreenHandler;
 import net.minecraft.screen.GrindstoneScreenHandler;
 import net.minecraft.util.Hand;
-import net.minecraft.util.Identifier;
+
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -98,7 +98,7 @@ public class AutoEnchanter extends Module {
 
     private int timer;
     private int attempts;
-    private Step step = Step.IDLE;
+    private Step step = Step.OPEN_TABLE;
 
     // BlockIterator fills results across a tick, so the position appears on a later call.
     private BlockPos pendingPos;
@@ -317,7 +317,7 @@ public class AutoEnchanter extends Module {
             Enchantment ench = registry.get(id);
             if (ench == null) continue;
 
-            RegistryKey<Enchantment> key = registry.getId(ench);
+            RegistryKey<Enchantment> key = registry.getKey(ench).orElse(null);
             if (key == null || !target.get().contains(key)) continue;
             if (menu.enchantmentLevel[i] < targetLevel.get()) continue;
 
