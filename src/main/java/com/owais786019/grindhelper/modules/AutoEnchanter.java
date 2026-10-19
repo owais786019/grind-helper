@@ -15,10 +15,8 @@ import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
-
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.enchantment.Enchantments;
-
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
@@ -28,7 +26,6 @@ import net.minecraft.registry.RegistryKeys;
 import net.minecraft.screen.EnchantmentScreenHandler;
 import net.minecraft.screen.GrindstoneScreenHandler;
 import net.minecraft.util.Hand;
-
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -40,8 +37,8 @@ import java.util.Set;
  * Rerolls an enchanting table until a target enchantment is offered.
  *
  * <p>Loop: item in table -> read offers -> target present? enchant it : burn the seed at the
- * cheapest row, grind the item clean, repeat. Nothing is enchanted permanently except the final
- * successful one, so the gear can never be ruined.
+ * cheapest row, grind the item clean, repeat. The gear is only ever enchanted for real on the
+ * final, successful attempt.
  */
 public class AutoEnchanter extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -58,7 +55,7 @@ public class AutoEnchanter extends Module {
         .description("Required level of the target enchantment.")
         .defaultValue(4)
         .min(1)
-        .sliderRange(1, 5)
+        .sliderRange(1, 4)
         .build()
     );
 
@@ -98,11 +95,14 @@ public class AutoEnchanter extends Module {
 
     private int timer;
     private int attempts;
+    private int stall;
     private Step step = Step.OPEN_TABLE;
 
-    // BlockIterator fills results across a tick, so the position appears on a later call.
+    /** Item type of the piece being rerolled, so we never grab unrelated gear. */
+    private Item targetItem;
+
+    /** Filled by BlockIterator's sweep, consumed by locate(). */
     private BlockPos pendingPos;
-    private Block pendingBlock;
 
     private enum Step {
         OPEN_TABLE,
@@ -122,16 +122,17 @@ public class AutoEnchanter extends Module {
     public void onActivate() {
         timer = 0;
         attempts = 0;
+        stall = 0;
+        targetItem = null;
         pendingPos = null;
-        pendingBlock = null;
         step = Step.OPEN_TABLE;
     }
 
     @Override
     public void onDeactivate() {
         pendingPos = null;
-        pendingBlock = null;
-        step = Step.OPEN_TABLE;
+        targetItem = null;
+        closeScreen();
     }
 
     @EventHandler
@@ -140,6 +141,7 @@ public class AutoEnchanter extends Module {
         if (++timer < delay.get()) return;
         timer = 0;
 
+        Step before = step;
         switch (step) {
             case OPEN_TABLE -> openTable();
             case ENSURE_ITEM -> ensureItem();
@@ -149,6 +151,17 @@ public class AutoEnchanter extends Module {
             case OPEN_GRINDSTONE -> openGrindstone();
             case GRIND_TAKE -> grindTake();
         }
+
+        // Every step either advances or performs one action; if neither happens for a long time
+        // something is desynced, so bail out instead of spinning forever.
+        if (step == before) {
+            if (++stall > 200) {
+                warning("Stuck in %s, giving up.", step);
+                toggle();
+            }
+        } else {
+            stall = 0;
+        }
     }
 
     // --- steps ---
@@ -156,6 +169,7 @@ public class AutoEnchanter extends Module {
     private void openTable() {
         if (!locate(Blocks.ENCHANTING_TABLE)) return;
 
+        closeScreen();
         interact(pendingPos);
         pendingPos = null;
         step = Step.ENSURE_ITEM;
@@ -165,9 +179,21 @@ public class AutoEnchanter extends Module {
         if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
         if (!menu.getSlot(0).hasStack()) {
-            int slot = findEnchantableSlot();
+            if (targetItem == null) {
+                int slot = findEnchantableSlot();
+                if (slot == -1) {
+                    warning("No enchantable item found in inventory.");
+                    toggle();
+                    return;
+                }
+                targetItem = mc.player.getInventory().getStack(slot).getItem();
+                InvUtils.move().from(slot).toId(0);
+                return;
+            }
+
+            int slot = findItemSlot(targetItem);
             if (slot == -1) {
-                warning("No enchantable item found in inventory.");
+                warning("Lost the item being enchanted.");
                 toggle();
                 return;
             }
@@ -175,7 +201,10 @@ public class AutoEnchanter extends Module {
             return;
         }
 
-        if (!menu.getSlot(1).hasStack()) {
+        if (targetItem == null) targetItem = menu.getSlot(0).getStack().getItem();
+
+        // Burning row 0 needs 1 lapis, but the winning row can need up to 3.
+        if (menu.getLapisCount() < 3) {
             int lapis = findItemSlot(Items.LAPIS_LAZULI);
             if (lapis == -1) {
                 warning("Out of lapis lazuli.");
@@ -194,13 +223,18 @@ public class AutoEnchanter extends Module {
 
         int row = findTargetRow(menu);
         if (row != -1) {
-            boolean creative = mc.player.getAbilities().creativeMode;
-
-            if (!creative && mc.player.experienceLevel < requiredLevel.get()) {
+            // Server requires both the row's level cost and its displayed power.
+            int need = Math.max(row + 1, menu.enchantmentPower[row]);
+            if (!mc.player.getAbilities().creativeMode && mc.player.experienceLevel < need) {
                 if (refillXp.get() && throwBottle()) return;
 
-                warning("Need %d XP levels (have %d) and no XP bottles left.", requiredLevel.get(), mc.player.experienceLevel);
+                warning("Need %d XP levels for row %d (have %d).", need, row + 1, mc.player.experienceLevel);
                 toggle();
+                return;
+            }
+
+            if (menu.getLapisCount() < row + 1) {
+                step = Step.ENSURE_ITEM;
                 return;
             }
 
@@ -222,6 +256,11 @@ public class AutoEnchanter extends Module {
     private void burn() {
         if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
+        if (menu.getLapisCount() < 1) {
+            step = Step.ENSURE_ITEM;
+            return;
+        }
+
         if (!mc.player.getAbilities().creativeMode && mc.player.experienceLevel < 1) {
             if (refillXp.get() && throwBottle()) return;
 
@@ -231,15 +270,20 @@ public class AutoEnchanter extends Module {
         }
 
         clickRow(menu, 0);
-        attempts++;
         step = Step.GRIND;
     }
 
     private void grind() {
         if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
-        // Pull the burned item back out of the table first.
         if (menu.getSlot(0).hasStack()) {
+            // If the burn click was rejected the item is still clean and the offers would repeat
+            // forever, so stop rather than reroll the same seed.
+            if (!menu.getSlot(0).getStack().hasEnchantments()) {
+                warning("Reroll click was rejected, stopping.");
+                toggle();
+                return;
+            }
             InvUtils.shiftClick().slotId(0);
             return;
         }
@@ -250,6 +294,7 @@ public class AutoEnchanter extends Module {
     private void openGrindstone() {
         if (!locate(Blocks.GRINDSTONE)) return;
 
+        closeScreen();
         interact(pendingPos);
         pendingPos = null;
         step = Step.GRIND_TAKE;
@@ -261,7 +306,7 @@ public class AutoEnchanter extends Module {
         if (!menu.getSlot(0).hasStack()) {
             int slot = findEnchantedSlot();
             if (slot == -1) {
-                warning("Lost track of the item.");
+                warning("Lost the item being ground.");
                 toggle();
                 return;
             }
@@ -269,9 +314,12 @@ public class AutoEnchanter extends Module {
             return;
         }
 
-        if (!menu.getSlot(2).hasStack()) return;
+        if (!menu.getSlot(2).hasStack()) {
+            // Grinding costs XP; at zero levels the output never appears.
+            if (mc.player.experienceLevel < 1 && refillXp.get() && throwBottle()) return;
+            return;
+        }
 
-        // Shift-click the output. Vanilla empties the inputs on take.
         InvUtils.shiftClick().slotId(2);
         step = Step.OPEN_TABLE;
     }
@@ -279,25 +327,24 @@ public class AutoEnchanter extends Module {
     // --- helpers ---
 
     /**
-     * Kicks off (or polls) a block search. BlockIterator fills results across the tick, so the
-     * first call only starts the sweep and returns false; the position appears on a later tick.
+     * Polls a block search. BlockIterator sweeps at a lower event priority than this module, so a
+     * registration only lands on the following tick — hence re-registering every tick until the
+     * position shows up.
      */
     private boolean locate(Block block) {
         if (pendingPos != null) return true;
-        if (pendingBlock == block) return false;
-
-        pendingBlock = block;
-        final BlockPos[] found = {null};
 
         BlockIterator.register(4, 4, (pos, state) -> {
-            if (found[0] == null && state.isOf(block)) found[0] = pos.toImmutable();
-        });
-
-        BlockIterator.after(() -> {
-            if (found[0] != null) pendingPos = found[0];
+            if (pendingPos == null && state.isOf(block)) pendingPos = pos.toImmutable();
         });
 
         return false;
+    }
+
+    private void closeScreen() {
+        if (mc.player == null) return;
+        if (mc.player.currentScreenHandler == mc.player.playerScreenHandler) return;
+        mc.player.closeScreen();
     }
 
     private void interact(BlockPos pos) {
@@ -307,8 +354,10 @@ public class AutoEnchanter extends Module {
         });
     }
 
+    /** Highest row offering the target, so the strongest qualifying result wins. */
     private int findTargetRow(EnchantmentScreenHandler menu) {
         Registry<Enchantment> registry = mc.world.getRegistryManager().getOrThrow(RegistryKeys.ENCHANTMENT);
+        int best = -1;
 
         for (int i = 0; i < 3; i++) {
             int id = menu.enchantmentId[i];
@@ -321,10 +370,10 @@ public class AutoEnchanter extends Module {
             if (key == null || !target.get().contains(key)) continue;
             if (menu.enchantmentLevel[i] < targetLevel.get()) continue;
 
-            return i;
+            best = i;
         }
 
-        return -1;
+        return best;
     }
 
     private void clickRow(EnchantmentScreenHandler menu, int row) {
@@ -342,10 +391,14 @@ public class AutoEnchanter extends Module {
         return -1;
     }
 
+    /** Only ever returns the tracked item type, never unrelated enchanted gear. */
     private int findEnchantedSlot() {
+        if (targetItem == null) return -1;
+
         for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
             if (stack.isEmpty()) continue;
+            if (stack.getItem() != targetItem) continue;
             if (stack.hasEnchantments()) return i;
         }
         return -1;
@@ -358,24 +411,22 @@ public class AutoEnchanter extends Module {
         return -1;
     }
 
+    /** True when an action was taken. Only reports progress if a bottle can actually be thrown. */
     private boolean throwBottle() {
         FindItemResult bottle = InvUtils.findInHotbar(Items.EXPERIENCE_BOTTLE);
         if (!bottle.found()) {
-            bottle = InvUtils.find(Items.EXPERIENCE_BOTTLE);
+            bottle = InvUtils.find(stack -> stack.getItem() == Items.EXPERIENCE_BOTTLE, 0, 35);
             if (!bottle.found()) return false;
+
             InvUtils.move().from(bottle.slot()).toHotbar(0);
             return true;
         }
 
-        FindItemResult hand = bottle;
+        int slot = bottle.slot();
         Rotations.rotate(mc.player.getYaw(), 90, () -> {
-            if (hand.getHand() != null) {
-                mc.interactionManager.interactItem(mc.player, hand.getHand());
-            } else {
-                InvUtils.swap(hand.slot(), true);
-                mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-                InvUtils.swapBack();
-            }
+            InvUtils.swap(slot, true);
+            mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+            InvUtils.swapBack();
         });
 
         return true;
