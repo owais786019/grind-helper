@@ -13,22 +13,26 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.class_1268;
-import net.minecraft.class_1718;
-import net.minecraft.class_1792;
-import net.minecraft.class_1799;
-import net.minecraft.class_1802;
-import net.minecraft.class_1887;
-import net.minecraft.class_2248;
-import net.minecraft.class_2246;
-import net.minecraft.class_2338;
-import net.minecraft.class_2350;
-import net.minecraft.class_2378;
-import net.minecraft.class_243;
-import net.minecraft.class_3803;
-import net.minecraft.class_3965;
-import net.minecraft.class_5321;
-import net.minecraft.class_7924;
+import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
+import net.minecraft.component.type.ItemEnchantmentsComponent;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.enchantment.Enchantments;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.registry.Registry;
+import net.minecraft.registry.RegistryKey;
+import net.minecraft.registry.RegistryKeys;
+import net.minecraft.screen.EnchantmentScreenHandler;
+import net.minecraft.screen.GrindstoneScreenHandler;
+import net.minecraft.util.Hand;
+import net.minecraft.util.Identifier;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.Set;
 
@@ -42,10 +46,10 @@ import java.util.Set;
 public class AutoEnchanter extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
-    private final Setting<Set<class_5321<class_1887>>> target = sgGeneral.add(new EnchantmentListSetting.Builder()
+    private final Setting<Set<RegistryKey<Enchantment>>> target = sgGeneral.add(new EnchantmentListSetting.Builder()
         .name("target")
         .description("Stop when any of these enchantments is offered.")
-        .defaultValue(class_1887.field_9111)
+        .defaultValue(Enchantments.PROTECTION)
         .build()
     );
 
@@ -96,9 +100,9 @@ public class AutoEnchanter extends Module {
     private int attempts;
     private Step step = Step.IDLE;
 
-    // Block search is async (BlockIterator fills over the tick), so we poll for the result.
-    private class_2338 pendingPos;
-    private class_2248 pendingBlock;
+    // BlockIterator fills results across a tick, so the position appears on a later call.
+    private BlockPos pendingPos;
+    private Block pendingBlock;
 
     private enum Step {
         OPEN_TABLE,
@@ -132,7 +136,7 @@ public class AutoEnchanter extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (mc.field_1724 == null || mc.field_1687 == null) return;
+        if (mc.player == null || mc.world == null) return;
         if (++timer < delay.get()) return;
         timer = 0;
 
@@ -150,7 +154,7 @@ public class AutoEnchanter extends Module {
     // --- steps ---
 
     private void openTable() {
-        if (!locate(class_2246.field_10485)) return;
+        if (!locate(Blocks.ENCHANTING_TABLE)) return;
 
         interact(pendingPos);
         pendingPos = null;
@@ -158,9 +162,9 @@ public class AutoEnchanter extends Module {
     }
 
     private void ensureItem() {
-        if (!(mc.field_1724.field_7512 instanceof class_1718 menu)) return;
+        if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
-        if (!menu.method_7611(0).method_7677()) {
+        if (!menu.getSlot(0).hasStack()) {
             int slot = findEnchantableSlot();
             if (slot == -1) {
                 warning("No enchantable item found in inventory.");
@@ -171,8 +175,8 @@ public class AutoEnchanter extends Module {
             return;
         }
 
-        if (!menu.method_7611(1).method_7677()) {
-            int lapis = findItemSlot(class_1802.field_8759);
+        if (!menu.getSlot(1).hasStack()) {
+            int lapis = findItemSlot(Items.LAPIS_LAZULI);
             if (lapis == -1) {
                 warning("Out of lapis lazuli.");
                 toggle();
@@ -186,16 +190,16 @@ public class AutoEnchanter extends Module {
     }
 
     private void readOffers() {
-        if (!(mc.field_1724.field_7512 instanceof class_1718 menu)) return;
+        if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
         int row = findTargetRow(menu);
         if (row != -1) {
-            boolean creative = mc.field_1724.field_7503.field_7477;
+            boolean creative = mc.player.getAbilities().creativeMode;
 
-            if (!creative && mc.field_1724.field_7502 < requiredLevel.get()) {
+            if (!creative && mc.player.experienceLevel < requiredLevel.get()) {
                 if (refillXp.get() && throwBottle()) return;
 
-                warning("Need %d XP levels (have %d) and no XP bottles left.", requiredLevel.get(), mc.field_1724.field_7502);
+                warning("Need %d XP levels (have %d) and no XP bottles left.", requiredLevel.get(), mc.player.experienceLevel);
                 toggle();
                 return;
             }
@@ -216,9 +220,9 @@ public class AutoEnchanter extends Module {
     }
 
     private void burn() {
-        if (!(mc.field_1724.field_7512 instanceof class_1718 menu)) return;
+        if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
-        if (!mc.field_1724.field_7503.field_7477 && mc.field_1724.field_7502 < 1) {
+        if (!mc.player.getAbilities().creativeMode && mc.player.experienceLevel < 1) {
             if (refillXp.get() && throwBottle()) return;
 
             warning("Out of XP levels and no XP bottles left.");
@@ -232,10 +236,10 @@ public class AutoEnchanter extends Module {
     }
 
     private void grind() {
-        if (!(mc.field_1724.field_7512 instanceof class_1718 menu)) return;
+        if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
         // Pull the burned item back out of the table first.
-        if (!menu.method_7611(0).method_7677()) {
+        if (menu.getSlot(0).hasStack()) {
             InvUtils.shiftClick().slotId(0);
             return;
         }
@@ -244,7 +248,7 @@ public class AutoEnchanter extends Module {
     }
 
     private void openGrindstone() {
-        if (!locate(class_2246.field_16337)) return;
+        if (!locate(Blocks.GRINDSTONE)) return;
 
         interact(pendingPos);
         pendingPos = null;
@@ -252,9 +256,9 @@ public class AutoEnchanter extends Module {
     }
 
     private void grindTake() {
-        if (!(mc.field_1724.field_7512 instanceof class_3803 menu)) return;
+        if (!(mc.player.currentScreenHandler instanceof GrindstoneScreenHandler menu)) return;
 
-        if (!menu.method_7611(0).method_7677()) {
+        if (!menu.getSlot(0).hasStack()) {
             int slot = findEnchantedSlot();
             if (slot == -1) {
                 warning("Lost track of the item.");
@@ -265,7 +269,7 @@ public class AutoEnchanter extends Module {
             return;
         }
 
-        if (menu.method_7611(2).method_7677()) return;
+        if (!menu.getSlot(2).hasStack()) return;
 
         // Shift-click the output. Vanilla empties the inputs on take.
         InvUtils.shiftClick().slotId(2);
@@ -278,19 +282,15 @@ public class AutoEnchanter extends Module {
      * Kicks off (or polls) a block search. BlockIterator fills results across the tick, so the
      * first call only starts the sweep and returns false; the position appears on a later tick.
      */
-    private boolean locate(class_2248 block) {
+    private boolean locate(Block block) {
         if (pendingPos != null) return true;
-
-        if (pendingBlock == block) {
-            // already sweeping, nothing found yet
-            return false;
-        }
+        if (pendingBlock == block) return false;
 
         pendingBlock = block;
-        final class_2338[] found = {null};
+        final BlockPos[] found = {null};
 
         BlockIterator.register(4, 4, (pos, state) -> {
-            if (found[0] == null && state.method_27852(block)) found[0] = pos.method_10062();
+            if (found[0] == null && state.isOf(block)) found[0] = pos.toImmutable();
         });
 
         BlockIterator.after(() -> {
@@ -300,26 +300,26 @@ public class AutoEnchanter extends Module {
         return false;
     }
 
-    private void interact(class_2338 pos) {
+    private void interact(BlockPos pos) {
         Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), 50, () -> {
-            class_3965 hit = new class_3965(class_243.method_24953(pos), class_2350.field_11036, pos, false);
-            mc.field_1761.method_2896(mc.field_1724, class_1268.field_5808, hit);
+            BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pos), Direction.UP, pos, false);
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hit);
         });
     }
 
-    private int findTargetRow(class_1718 menu) {
-        class_2378<class_1887> registry = mc.field_1687.method_30349().method_30530(class_7924.field_41265);
+    private int findTargetRow(EnchantmentScreenHandler menu) {
+        Registry<Enchantment> registry = mc.world.getRegistryManager().getOrThrow(RegistryKeys.ENCHANTMENT);
 
         for (int i = 0; i < 3; i++) {
-            int id = menu.field_7812[i];
+            int id = menu.enchantmentId[i];
             if (id < 0) continue;
 
-            class_1887 ench = registry.method_10200(id);
+            Enchantment ench = registry.get(id);
             if (ench == null) continue;
 
-            class_5321<class_1887> key = registry.method_10221(ench);
+            RegistryKey<Enchantment> key = registry.getId(ench);
             if (key == null || !target.get().contains(key)) continue;
-            if (menu.field_7810[i] < targetLevel.get()) continue;
+            if (menu.enchantmentLevel[i] < targetLevel.get()) continue;
 
             return i;
         }
@@ -327,16 +327,16 @@ public class AutoEnchanter extends Module {
         return -1;
     }
 
-    private void clickRow(class_1718 menu, int row) {
-        mc.field_1761.method_2900(menu.field_7763, row);
+    private void clickRow(EnchantmentScreenHandler menu, int row) {
+        mc.interactionManager.clickButton(menu.syncId, row);
     }
 
     private int findEnchantableSlot() {
         for (int i = 0; i < 36; i++) {
-            class_1799 stack = mc.field_1724.method_31548().method_5438(i);
-            if (stack.method_7960()) continue;
-            if (!stack.method_7909().method_7885()) continue;
-            if (stack.method_57530()) continue;
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            if (stack.isEmpty()) continue;
+            if (!stack.isEnchantable()) continue;
+            if (stack.hasEnchantments()) continue;
             return i;
         }
         return -1;
@@ -344,36 +344,36 @@ public class AutoEnchanter extends Module {
 
     private int findEnchantedSlot() {
         for (int i = 0; i < 36; i++) {
-            class_1799 stack = mc.field_1724.method_31548().method_5438(i);
-            if (stack.method_7960()) continue;
-            if (stack.method_57530()) return i;
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            if (stack.isEmpty()) continue;
+            if (stack.hasEnchantments()) return i;
         }
         return -1;
     }
 
-    private int findItemSlot(class_1792 item) {
+    private int findItemSlot(Item item) {
         for (int i = 0; i < 36; i++) {
-            if (mc.field_1724.method_31548().method_5438(i).method_7909() == item) return i;
+            if (mc.player.getInventory().getStack(i).getItem() == item) return i;
         }
         return -1;
     }
 
     private boolean throwBottle() {
-        FindItemResult bottle = InvUtils.findInHotbar(class_1802.field_8287);
+        FindItemResult bottle = InvUtils.findInHotbar(Items.EXPERIENCE_BOTTLE);
         if (!bottle.found()) {
-            bottle = InvUtils.find(class_1802.field_8287);
+            bottle = InvUtils.find(Items.EXPERIENCE_BOTTLE);
             if (!bottle.found()) return false;
             InvUtils.move().from(bottle.slot()).toHotbar(0);
             return true;
         }
 
         FindItemResult hand = bottle;
-        Rotations.rotate(mc.field_1724.method_36454(), 90, () -> {
+        Rotations.rotate(mc.player.getYaw(), 90, () -> {
             if (hand.getHand() != null) {
-                mc.field_1761.method_2919(mc.field_1724, hand.getHand());
+                mc.interactionManager.interactItem(mc.player, hand.getHand());
             } else {
                 InvUtils.swap(hand.slot(), true);
-                mc.field_1761.method_2919(mc.field_1724, class_1268.field_5808);
+                mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
                 InvUtils.swapBack();
             }
         });
