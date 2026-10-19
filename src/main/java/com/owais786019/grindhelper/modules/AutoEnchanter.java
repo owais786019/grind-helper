@@ -68,15 +68,6 @@ public class AutoEnchanter extends Module {
         .build()
     );
 
-    private final Setting<Integer> requiredLevel = sgGeneral.add(new IntSetting.Builder()
-        .name("required-level")
-        .description("XP level needed to unlock the bottom row. 30 with 15 bookshelves.")
-        .defaultValue(30)
-        .min(1)
-        .sliderRange(1, 30)
-        .build()
-    );
-
     private final Setting<Boolean> refillXp = sgGeneral.add(new BoolSetting.Builder()
         .name("refill-xp")
         .description("Throw XP bottles from your inventory when levels are too low.")
@@ -98,6 +89,7 @@ public class AutoEnchanter extends Module {
     private int stall;
     private int burnWait;
     private int needLevel;
+    private int doneWait;
     private Step step = Step.OPEN_TABLE;
 
     /** Item type of the piece being rerolled, so we never grab unrelated gear. */
@@ -114,7 +106,8 @@ public class AutoEnchanter extends Module {
         GRIND,
         OPEN_GRINDSTONE,
         GRIND_TAKE,
-        REFILL_XP
+        REFILL_XP,
+        DONE
     }
 
     public AutoEnchanter() {
@@ -128,6 +121,7 @@ public class AutoEnchanter extends Module {
         stall = 0;
         burnWait = 0;
         needLevel = 0;
+        doneWait = 0;
         targetItem = null;
         pendingPos = null;
         step = Step.OPEN_TABLE;
@@ -156,6 +150,7 @@ public class AutoEnchanter extends Module {
             case OPEN_GRINDSTONE -> openGrindstone();
             case GRIND_TAKE -> grindTake();
             case REFILL_XP -> refillXp();
+            case DONE -> done();
         }
 
         // Every step either advances or performs one action; if neither happens for a long time
@@ -209,16 +204,18 @@ public class AutoEnchanter extends Module {
 
         if (targetItem == null) targetItem = menu.getSlot(0).getStack().getItem();
 
-        // Burning row 0 needs 1 lapis, but the winning row can need up to 3.
+        // Top up towards the 3 a bottom-row pick could need, but keep going with what we have.
         if (menu.getLapisCount() < 3) {
             int lapis = findItemSlot(Items.LAPIS_LAZULI);
-            if (lapis == -1) {
+            if (lapis != -1) {
+                InvUtils.move().from(lapis).toId(1);
+                return;
+            }
+            if (menu.getLapisCount() < 1) {
                 warning("Out of lapis lazuli.");
                 toggle();
                 return;
             }
-            InvUtils.move().from(lapis).toId(1);
-            return;
         }
 
         step = Step.READ_OFFERS;
@@ -243,14 +240,9 @@ public class AutoEnchanter extends Module {
                 return;
             }
 
-            if (menu.getLapisCount() < row + 1) {
-                step = Step.ENSURE_ITEM;
-                return;
-            }
-
             clickRow(menu, row);
-            info("Got the target after %d reroll(s).", attempts);
-            toggle();
+            doneWait = 0;
+            step = Step.DONE;
             return;
         }
 
@@ -273,9 +265,10 @@ public class AutoEnchanter extends Module {
                 return;
             }
 
-            // Lapis is present but the row is still greyed out, so force a fresh offer set.
-            closeScreen();
-            step = Step.OPEN_TABLE;
+            // Reopening cannot reroll the offers (the seed only advances after an enchant), so a
+            // greyed-out row with lapis in place means this item simply cannot be enchanted.
+            warning("This item cannot be enchanted.");
+            toggle();
             return;
         }
 
@@ -292,6 +285,7 @@ public class AutoEnchanter extends Module {
         }
 
         clickRow(menu, 0);
+        attempts++;
         burnWait = 0;
         step = Step.GRIND;
     }
@@ -342,6 +336,12 @@ public class AutoEnchanter extends Module {
 
         InvUtils.shiftClick().slotId(2);
         step = Step.OPEN_TABLE;
+    }
+
+    private void done() {
+        if (++doneWait < 5) return;
+        info("Got the target after %d reroll(s).", attempts);
+        toggle();
     }
 
     private void refillXp() {
@@ -405,6 +405,8 @@ public class AutoEnchanter extends Module {
             RegistryKey<Enchantment> key = registry.getKey(ench).orElse(null);
             if (key == null || !target.get().contains(key)) continue;
             if (menu.enchantmentLevel[i] < targetLevel.get()) continue;
+            // clickMenuButton consumes row+1 lapis, so a row we cannot pay for is not an offer.
+            if (menu.getLapisCount() < i + 1) continue;
 
             best = i;
         }
