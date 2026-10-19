@@ -18,11 +18,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Generate Minecraft sources
         run: ./gradlew genSources --stacktrace
+      - name: Locate sources jar
+        run: find "$GRADLE_USER_HOME" "$GITHUB_WORKSPACE" -name '*sources*.jar' 2>/dev/null
       - name: Dump EnchantmentScreenHandler offer logic
         run: |
-          F=$(find . -name 'EnchantmentScreenHandler.java' | head -1)
-          echo "FOUND: $F"
+          F=$(find "$GRADLE_USER_HOME" "$GITHUB_WORKSPACE" -name '*sources*.jar' 2>/dev/null | grep -v 'meteor\|yarn' | head -1)
+          echo "JAR: $F"
+          rm -rf /tmp/src && mkdir -p /tmp/src
+          unzip -o -q "$F" 'net/minecraft/screen/EnchantmentScreenHandler.java' -d /tmp/src
+          S=/tmp/src/net/minecraft/screen/EnchantmentScreenHandler.java
           echo "===== ids/levels written ====="
-          grep -n -B6 -A6 'enchantmentId\[' "$F"
+          grep -n -B10 -A4 'enchantmentId\[' "$S"
           echo "===== property delegate ====="
-          grep -n -B3 -A12 'addProperties\|PropertyDelegate' "$F"
+          grep -n -B3 -A15 'addProperties\|PropertyDelegate' "$S"
+          echo "===== client read side ====="
+          unzip -o -q "$F" 'net/minecraft/client/gui/screen/ingame/EnchantmentScreen.java' -d /tmp/src
+          grep -n -B3 -A6 'enchantmentId\|enchantmentPower' /tmp/src/net/minecraft/client/gui/screen/ingame/EnchantmentScreen.java
