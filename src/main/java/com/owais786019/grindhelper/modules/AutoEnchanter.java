@@ -96,6 +96,8 @@ public class AutoEnchanter extends Module {
     private int timer;
     private int attempts;
     private int stall;
+    private int burnWait;
+    private int needLevel;
     private Step step = Step.OPEN_TABLE;
 
     /** Item type of the piece being rerolled, so we never grab unrelated gear. */
@@ -111,7 +113,8 @@ public class AutoEnchanter extends Module {
         BURN,
         GRIND,
         OPEN_GRINDSTONE,
-        GRIND_TAKE
+        GRIND_TAKE,
+        REFILL_XP
     }
 
     public AutoEnchanter() {
@@ -123,6 +126,8 @@ public class AutoEnchanter extends Module {
         timer = 0;
         attempts = 0;
         stall = 0;
+        burnWait = 0;
+        needLevel = 0;
         targetItem = null;
         pendingPos = null;
         step = Step.OPEN_TABLE;
@@ -150,6 +155,7 @@ public class AutoEnchanter extends Module {
             case GRIND -> grind();
             case OPEN_GRINDSTONE -> openGrindstone();
             case GRIND_TAKE -> grindTake();
+            case REFILL_XP -> refillXp();
         }
 
         // Every step either advances or performs one action; if neither happens for a long time
@@ -226,7 +232,11 @@ public class AutoEnchanter extends Module {
             // Server requires both the row's level cost and its displayed power.
             int need = Math.max(row + 1, menu.enchantmentPower[row]);
             if (!mc.player.getAbilities().creativeMode && mc.player.experienceLevel < need) {
-                if (refillXp.get() && throwBottle()) return;
+                if (refillXp.get()) {
+                    needLevel = need;
+                    step = Step.REFILL_XP;
+                    return;
+                }
 
                 warning("Need %d XP levels for row %d (have %d).", need, row + 1, mc.player.experienceLevel);
                 toggle();
@@ -256,13 +266,25 @@ public class AutoEnchanter extends Module {
     private void burn() {
         if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
-        if (menu.getLapisCount() < 1) {
-            step = Step.ENSURE_ITEM;
+        // enchantmentPower is 0 when the row is unavailable (no lapis or not enough levels).
+        if (menu.enchantmentPower[0] <= 0) {
+            if (menu.getLapisCount() < 1) {
+                step = Step.ENSURE_ITEM;
+                return;
+            }
+
+            // Lapis is present but the row is still greyed out, so force a fresh offer set.
+            closeScreen();
+            step = Step.OPEN_TABLE;
             return;
         }
 
         if (!mc.player.getAbilities().creativeMode && mc.player.experienceLevel < 1) {
-            if (refillXp.get() && throwBottle()) return;
+            if (refillXp.get()) {
+                needLevel = 1;
+                step = Step.REFILL_XP;
+                return;
+            }
 
             warning("Out of XP levels and no XP bottles left.");
             toggle();
@@ -270,6 +292,7 @@ public class AutoEnchanter extends Module {
         }
 
         clickRow(menu, 0);
+        burnWait = 0;
         step = Step.GRIND;
     }
 
@@ -277,11 +300,12 @@ public class AutoEnchanter extends Module {
         if (!(mc.player.currentScreenHandler instanceof EnchantmentScreenHandler menu)) return;
 
         if (menu.getSlot(0).hasStack()) {
-            // If the burn click was rejected the item is still clean and the offers would repeat
-            // forever, so stop rather than reroll the same seed.
+            // The burn is applied server-side, so give it a moment before deciding it failed.
             if (!menu.getSlot(0).getStack().hasEnchantments()) {
-                warning("Reroll click was rejected, stopping.");
-                toggle();
+                if (++burnWait > 40) {
+                    warning("Reroll click was rejected, stopping.");
+                    toggle();
+                }
                 return;
             }
             InvUtils.shiftClick().slotId(0);
@@ -314,14 +338,26 @@ public class AutoEnchanter extends Module {
             return;
         }
 
-        if (!menu.getSlot(2).hasStack()) {
-            // Grinding costs XP; at zero levels the output never appears.
-            if (mc.player.experienceLevel < 1 && refillXp.get() && throwBottle()) return;
-            return;
-        }
+        if (!menu.getSlot(2).hasStack()) return;
 
         InvUtils.shiftClick().slotId(2);
         step = Step.OPEN_TABLE;
+    }
+
+    private void refillXp() {
+        if (mc.player.experienceLevel >= needLevel) {
+            step = Step.OPEN_TABLE;
+            return;
+        }
+
+        // Bottles cannot be thrown from inside a container screen.
+        closeScreen();
+        if (mc.player.currentScreenHandler != mc.player.playerScreenHandler) return;
+
+        if (!throwBottle()) {
+            warning("Out of XP bottles, need level %d.", needLevel);
+            toggle();
+        }
     }
 
     // --- helpers ---
@@ -411,7 +447,7 @@ public class AutoEnchanter extends Module {
         return -1;
     }
 
-    /** True when an action was taken. Only reports progress if a bottle can actually be thrown. */
+    /** True when an action was taken: either a bottle was thrown or one was moved to hand. */
     private boolean throwBottle() {
         FindItemResult bottle = InvUtils.findInHotbar(Items.EXPERIENCE_BOTTLE);
         if (!bottle.found()) {
